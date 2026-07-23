@@ -28,10 +28,15 @@ local WAYPOINT_REACHED_DISTANCE = 3.5 -- change waypoints before fully stopping
 local STUCK_DISTANCE_THRESHOLD = 0.75
 local STUCK_TICKS_THRESHOLD = 8
 local CART_SEAT_NAME = "HoverCartSeat" -- must match HoverCart.server.lua's SEAT_NAME
-local CART_RAM_DISTANCE = 12 -- studs; how close an occupied cart must get to a guard to ragdoll them
+local CART_RAM_DISTANCE = 12 -- studs; how close an occupied cart's front point must get to a guard to ragdoll them
+local CART_RAM_CHECK_INTERVAL = 0.08 -- seconds between ram checks (still well under human reaction time)
+local CART_FRONT_OFFSET = 4 -- studs in front of the seat (along its LookVector) used as the ram reference point instead of the seat's own center, so hits register at the bumper
+local MINIMUM_RAM_SPEED = 8 -- studs/sec; the cart itself must be moving at least this fast for contact to count as a ram, not just idling nearby
 local CART_RAGDOLL_DURATION = 10 -- seconds a guard ragdolls after being hit by an occupied HoverCart
+local CART_HIT_COOLDOWN = 1.5 -- seconds after recovering before another ram can re-trigger (in case it lands right back in range)
 local CART_LAUNCH_VELOCITY_MULTIPLIER = 1.75 -- how much of the cart's own velocity carries into the launch
 local CART_LAUNCH_UPWARD_POP = { 25, 40 } -- studs/sec; random upward pop range for a dramatic launch
+local DIRECT_MOVE_REISSUE_THRESHOLD = 2 -- studs; only re-issue MoveTo during direct chase if the target moved at least this much
 
 local shopperTeam = Teams:WaitForChild("Shoppers")
 
@@ -203,6 +208,7 @@ local function attachMovement(humanoid, rootPart, token, state)
 	local waypointIndex = 1
 	local lastPathTarget = nil
 	local directTarget = nil
+	local lastIssuedDirectTarget = nil
 
 	local function moveToCurrentWaypoint()
 		local waypoint = waypoints[waypointIndex]
@@ -220,10 +226,12 @@ local function attachMovement(humanoid, rootPart, token, state)
 			waypoints = {}
 			waypointIndex = 1
 			humanoid:MoveTo(targetPosition)
+			lastIssuedDirectTarget = targetPosition
 			return
 		end
 
 		directTarget = nil
+		lastIssuedDirectTarget = nil
 
 		if not forceRepath
 			and lastPathTarget
@@ -270,8 +278,14 @@ local function attachMovement(humanoid, rootPart, token, state)
 
 		if directTarget then
 			-- Re-issuing MoveTo keeps the humanoid steering continuously instead
-			-- of braking between short chase updates.
-			humanoid:MoveTo(directTarget)
+			-- of braking between short chase updates -- but only when the target
+			-- has actually moved enough to matter. Calling MoveTo() on literally
+			-- every Heartbeat (~60/sec) regardless was real wasted overhead, since
+			-- the predicted target only updates every CHASE_RETARGET_INTERVAL anyway.
+			if not lastIssuedDirectTarget or (directTarget - lastIssuedDirectTarget).Magnitude >= DIRECT_MOVE_REISSUE_THRESHOLD then
+				humanoid:MoveTo(directTarget)
+				lastIssuedDirectTarget = directTarget
+			end
 			return
 		end
 
@@ -290,20 +304,39 @@ local function attachMovement(humanoid, rootPart, token, state)
 end
 
 -- Ragdolls + launches a guard rammed by an occupied cart. Called from a
--- per-frame distance check (see spawnOneChaser) rather than a Touched event,
--- so it fires the instant the cart gets close enough -- no waiting on the
--- physics engine to generate a contact.
-local function ragdollGuardFromCart(character, rootPart, state, cartSeat)
-	if state.isRagdolled then
+-- throttled distance check (see spawnOneChaser) rather than a Touched event,
+-- so it fires close to instantly once in range -- no waiting on the physics
+-- engine to generate a contact. lastCartHit guards against immediately
+-- re-triggering the instant it recovers, in case it lands right back within
+-- CART_RAM_DISTANCE of the cart. Gated on MINIMUM_RAM_SPEED so a cart just
+-- idling nearby doesn't count -- only an actual moving ram does.
+local function ragdollGuardFromCart(character, rootPart, humanoid, state, cartSeat)
+	local now = os.clock()
+	if state.isRagdolled or (now - state.lastCartHit) < CART_HIT_COOLDOWN then
 		return
 	end
+
+	local cartVelocity = cartSeat.AssemblyLinearVelocity
+	if cartVelocity.Magnitude < MINIMUM_RAM_SPEED then
+		return
+	end
+
 	state.isRagdolled = true
+	state.lastCartHit = now
+	humanoid.AutoRotate = false
 	ragdollCharacterEvent:Fire(character, CART_RAGDOLL_DURATION)
+
+	-- Lock physics ownership to the server for the launch -- same fix as
+	-- HoverCart's own SetNetworkOwner call. Without it, Roblox can hand
+	-- simulation of this now-airborne body to a nearby client, which fights
+	-- the velocity we're about to set and can show up as a stutter.
+	pcall(function()
+		rootPart:SetNetworkOwner(nil)
+	end)
 
 	-- Launch dramatically: inherit the cart's own momentum (scaled up) plus
 	-- a strong random upward pop and spin, so it reads as getting flung, not
 	-- just going limp in place.
-	local cartVelocity = cartSeat.AssemblyLinearVelocity
 	local upwardPop = math.random(CART_LAUNCH_UPWARD_POP[1], CART_LAUNCH_UPWARD_POP[2])
 	rootPart.AssemblyLinearVelocity = cartVelocity * CART_LAUNCH_VELOCITY_MULTIPLIER
 		+ Vector3.new(math.random(-15, 15), upwardPop, math.random(-15, 15))
@@ -313,6 +346,9 @@ local function ragdollGuardFromCart(character, rootPart, state, cartSeat)
 
 	task.delay(CART_RAGDOLL_DURATION, function()
 		state.isRagdolled = false
+		if character.Parent then
+			humanoid.AutoRotate = true
+		end
 	end)
 end
 
@@ -350,17 +386,21 @@ local function spawnOneChaser(myToken, spawnPart, spawnIndex)
 	local humanoid = npc:WaitForChild("Humanoid")
 	humanoid.WalkSpeed = WALK_SPEED
 
-	local guardState = { isRagdolled = false }
+	local guardState = { isRagdolled = false, lastCartHit = -math.huge }
 	attachTagDetection(npc)
 	table.insert(activeNPCs, npc)
 
 	local rootPart = npc.PrimaryPart
 	local setTarget = attachMovement(humanoid, rootPart, myToken, guardState)
 
-	-- Distance-based cart-ram check, every frame -- see ragdollGuardFromCart
-	-- for why this replaced a Touched-event approach.
+	-- Distance-based cart-ram check -- see ragdollGuardFromCart for why this
+	-- replaced a Touched-event approach. Throttled to CART_RAM_CHECK_INTERVAL
+	-- (still well under human reaction time) rather than every single frame,
+	-- and compares squared distances to skip the sqrt in Vector3.Magnitude.
+	local ramCheckElapsed = 0
+	local ramDistanceSquared = CART_RAM_DISTANCE * CART_RAM_DISTANCE
 	local ramCheckConn
-	ramCheckConn = RunService.Heartbeat:Connect(function()
+	ramCheckConn = RunService.Heartbeat:Connect(function(deltaTime)
 		if activeToken ~= myToken or not npc.Parent then
 			ramCheckConn:Disconnect()
 			return
@@ -368,10 +408,24 @@ local function spawnOneChaser(myToken, spawnPart, spawnIndex)
 		if guardState.isRagdolled then
 			return
 		end
+
+		ramCheckElapsed += deltaTime
+		if ramCheckElapsed < CART_RAM_CHECK_INTERVAL then
+			return
+		end
+		ramCheckElapsed = 0
+
 		for _, cartSeat in cartSeats do
-			if cartSeat.Occupant and (cartSeat.Position - rootPart.Position).Magnitude <= CART_RAM_DISTANCE then
-				ragdollGuardFromCart(npc, rootPart, guardState, cartSeat)
-				break
+			if cartSeat.Occupant then
+				-- A point in front of the seat, not the seat's own center --
+				-- makes contact register at the cart's bumper instead of only
+				-- after a guard has already reached deep into its footprint.
+				local frontPoint = cartSeat.Position + cartSeat.CFrame.LookVector * CART_FRONT_OFFSET
+				local offset = frontPoint - rootPart.Position
+				if offset:Dot(offset) <= ramDistanceSquared then
+					ragdollGuardFromCart(npc, rootPart, humanoid, guardState, cartSeat)
+					break
+				end
 			end
 		end
 	end)
