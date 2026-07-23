@@ -4,9 +4,10 @@
 -- Shopper-only "hoveround" cart: press E to hop in, press E again to hop out
 -- (ProximityPrompt's default key is already E). Hovers at a fixed height
 -- above the floor and drives off the VehicleSeat's Throttle/Steer, which
--- Roblox fills in automatically from the seated player's WASD input. Getting
--- tagged while riding hands off to TagFreeze's cart-eject/ragdoll path
--- instead of the normal standing freeze (see TagFreeze.server.lua).
+-- Roblox fills in automatically from the seated player's WASD input. Riding
+-- it makes a shopper immune to being tagged (see TagFreeze.server.lua), and
+-- ramming an occupied cart into a security guard ragdolls them for a while
+-- (see AIChaser.server.lua).
 --
 -- SETUP: put your cart model(s) anywhere under Workspace.Map, each with an
 -- unanchored VehicleSeat renamed to "HoverCartSeat". Any decorative body

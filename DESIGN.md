@@ -97,14 +97,17 @@ playtests)
 Optional faster movement for Shoppers, roaming the main aisles. Press E to
 hop in/out (ProximityPrompt).
 
-- **25 studs/sec** vs. the player's base 16 — a real speed advantage in open
+- **35 studs/sec** vs. the player's base 16 — a real speed advantage in open
   aisles, at the cost of being unable to shop while riding
 - Must dismount (E) to buy figures off shelves — can't shop from the cart
 - Security-only rule: Security can never ride, so this never becomes a
   chaser tool
-- Getting tagged while riding ejects the shopper (ragdoll physics, tumbles a
-  couple seconds) instead of the normal standing freeze, then settles into
-  the standard frozen/rescue state once they land
+- **Immune while riding** — Security can't tag/freeze a shopper seated in the
+  cart at all. It's a real temporary safe-escape tool, at the cost of not
+  being able to shop until you get out
+- Ramming an occupied cart into a Security guard ragdolls them for 10
+  seconds (pauses their AI entirely) — the cart doubles as offense, not just
+  escape
 - **To do:** banking/tilt lean into turns for extra physicality — holding off
   until there's a real cart model, since it needs a dedicated visual body
   part rather than one rigidly welded to the physics seat

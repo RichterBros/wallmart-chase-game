@@ -27,6 +27,11 @@ local PATH_TARGET_MOVE_THRESHOLD = 5 -- do not rebuild nearly identical paths
 local WAYPOINT_REACHED_DISTANCE = 3.5 -- change waypoints before fully stopping
 local STUCK_DISTANCE_THRESHOLD = 0.75
 local STUCK_TICKS_THRESHOLD = 8
+local CART_SEAT_NAME = "HoverCartSeat" -- must match HoverCart.server.lua's SEAT_NAME
+local CART_RAM_DISTANCE = 12 -- studs; how close an occupied cart must get to a guard to ragdoll them
+local CART_RAGDOLL_DURATION = 10 -- seconds a guard ragdolls after being hit by an occupied HoverCart
+local CART_LAUNCH_VELOCITY_MULTIPLIER = 1.75 -- how much of the cart's own velocity carries into the launch
+local CART_LAUNCH_UPWARD_POP = { 25, 40 } -- studs/sec; random upward pop range for a dramatic launch
 
 local shopperTeam = Teams:WaitForChild("Shoppers")
 
@@ -90,9 +95,22 @@ if #chaserSpawnPoints == 0 then
 	table.insert(chaserSpawnPoints, workspace.Map:WaitForChild("ChaserSpawn"))
 end
 
+-- Collected once at server start -- carts are static level geometry, same
+-- assumption as chaserSpawnPoints above. Used for the distance-based cart-ram
+-- check (see ragdollGuardFromCart) instead of a physics Touched event, which
+-- has inherent timing slop (contact generation, step size) that made the
+-- guard visibly clip into the cart before the launch kicked in.
+local cartSeats = {}
+for _, descendant in workspace.Map:GetDescendants() do
+	if descendant:IsA("VehicleSeat") and descendant.Name == CART_SEAT_NAME then
+		table.insert(cartSeats, descendant)
+	end
+end
+
 local spawnEvent = ServerStorage:WaitForChild("AIChaserSpawn")
 local despawnEvent = ServerStorage:WaitForChild("AIChaserDespawn")
 local freezeShopperEvent = ServerStorage:WaitForChild("FreezeShopperEvent")
+local ragdollCharacterEvent = ServerStorage:WaitForChild("RagdollCharacterEvent")
 
 local activeNPCs = {}
 local activeToken = 0 -- bumped on despawn so any running wander loop stops itself
@@ -180,7 +198,7 @@ end
 -- at every waypoint is what caused the visible stutter.
 -- `token` mirrors activeToken so this NPC's Heartbeat connection disconnects
 -- itself once the NPC is despawned, instead of leaking forever.
-local function attachMovement(humanoid, rootPart, token)
+local function attachMovement(humanoid, rootPart, token, state)
 	local waypoints = {}
 	local waypointIndex = 1
 	local lastPathTarget = nil
@@ -246,6 +264,10 @@ local function attachMovement(humanoid, rootPart, token)
 			return
 		end
 
+		if state.isRagdolled then
+			return -- don't fight the ragdoll launch with MoveTo calls
+		end
+
 		if directTarget then
 			-- Re-issuing MoveTo keeps the humanoid steering continuously instead
 			-- of braking between short chase updates.
@@ -265,6 +287,33 @@ local function attachMovement(humanoid, rootPart, token)
 	end)
 
 	return setTarget
+end
+
+-- Ragdolls + launches a guard rammed by an occupied cart. Called from a
+-- per-frame distance check (see spawnOneChaser) rather than a Touched event,
+-- so it fires the instant the cart gets close enough -- no waiting on the
+-- physics engine to generate a contact.
+local function ragdollGuardFromCart(character, rootPart, state, cartSeat)
+	if state.isRagdolled then
+		return
+	end
+	state.isRagdolled = true
+	ragdollCharacterEvent:Fire(character, CART_RAGDOLL_DURATION)
+
+	-- Launch dramatically: inherit the cart's own momentum (scaled up) plus
+	-- a strong random upward pop and spin, so it reads as getting flung, not
+	-- just going limp in place.
+	local cartVelocity = cartSeat.AssemblyLinearVelocity
+	local upwardPop = math.random(CART_LAUNCH_UPWARD_POP[1], CART_LAUNCH_UPWARD_POP[2])
+	rootPart.AssemblyLinearVelocity = cartVelocity * CART_LAUNCH_VELOCITY_MULTIPLIER
+		+ Vector3.new(math.random(-15, 15), upwardPop, math.random(-15, 15))
+	rootPart.AssemblyAngularVelocity = Vector3.new(
+		math.random(-10, 10), math.random(-10, 10), math.random(-10, 10)
+	)
+
+	task.delay(CART_RAGDOLL_DURATION, function()
+		state.isRagdolled = false
+	end)
 end
 
 local function attachTagDetection(character)
@@ -301,11 +350,31 @@ local function spawnOneChaser(myToken, spawnPart, spawnIndex)
 	local humanoid = npc:WaitForChild("Humanoid")
 	humanoid.WalkSpeed = WALK_SPEED
 
+	local guardState = { isRagdolled = false }
 	attachTagDetection(npc)
 	table.insert(activeNPCs, npc)
 
 	local rootPart = npc.PrimaryPart
-	local setTarget = attachMovement(humanoid, rootPart, myToken)
+	local setTarget = attachMovement(humanoid, rootPart, myToken, guardState)
+
+	-- Distance-based cart-ram check, every frame -- see ragdollGuardFromCart
+	-- for why this replaced a Touched-event approach.
+	local ramCheckConn
+	ramCheckConn = RunService.Heartbeat:Connect(function()
+		if activeToken ~= myToken or not npc.Parent then
+			ramCheckConn:Disconnect()
+			return
+		end
+		if guardState.isRagdolled then
+			return
+		end
+		for _, cartSeat in cartSeats do
+			if cartSeat.Occupant and (cartSeat.Position - rootPart.Position).Magnitude <= CART_RAM_DISTANCE then
+				ragdollGuardFromCart(npc, rootPart, guardState, cartSeat)
+				break
+			end
+		end
+	end)
 
 	-- Per-guard chase/patrol state. lockedTarget persists across ticks so a
 	-- guard commits to a chase (with LOSE_RANGE hysteresis) instead of
@@ -328,6 +397,15 @@ local function spawnOneChaser(myToken, spawnPart, spawnIndex)
 
 	task.spawn(function()
 		while activeToken == myToken and npc.Parent do
+			if guardState.isRagdolled then
+				-- Pause all decision-making while ragdolled -- MoveTo calls
+				-- don't do anything useful against a PlatformStand humanoid
+				-- anyway, and the stuck-watchdog nudging a limp ragdoll body
+				-- would look wrong. Resumes automatically once it settles.
+				task.wait(0.2)
+				continue
+			end
+
 			local currentPosition = rootPart.Position
 
 			-- Stuck watchdog: pathfinding can produce a technically-valid route

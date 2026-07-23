@@ -20,8 +20,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local RESCUE_CHANNEL_TIME = 3 -- seconds a teammate must stand near a frozen shopper
 local RESCUE_TIMEOUT = 25 -- seconds before a frozen shopper is marked "Out"
 local RESCUE_RANGE = 6 -- studs; how close a rescuer must stay during the channel
-local CART_SEAT_NAME = "HoverCartSeat" -- must match HoverCart.server.lua's SEAT_NAME
-local TUMBLE_DURATION = 2 -- seconds a cart-tagged shopper ragdolls/tumbles before settling into the standard frozen look
+local CART_SEAT_NAME = "HoverCartSeat" -- must match HoverCart.server.lua's SEAT_NAME -- riding it makes a shopper immune to tags
 
 local shopperTeam = Teams:WaitForChild("Shoppers")
 local securityTeam = Teams:WaitForChild("Security")
@@ -80,11 +79,13 @@ local function setFrozenLook(character, frozen)
 	end
 end
 
--- ==================== RAGDOLL (cart ejection) ====================
+-- ==================== RAGDOLL (generic technique) ====================
 -- Converts every Motor6D joint to a physics-driven BallSocketConstraint so
 -- the character goes limp instead of staying rigidly upright -- the
 -- standard Roblox ragdoll technique. PlatformStand disables the humanoid's
 -- own upright-balancing controller so it doesn't fight the physics.
+-- Exposed generically below (RagdollCharacterEvent) for AIChaser to ragdoll
+-- a security guard that gets rammed by an occupied HoverCart.
 local RAGDOLL_ATTACHMENT_NAME = "RagdollAttachment"
 local RAGDOLL_SOCKET_NAME = "RagdollSocket"
 
@@ -136,21 +137,6 @@ local function unragdollCharacter(character)
 	end
 end
 
--- Pops a seated shopper out of a HoverCart and sends them tumbling: inherits
--- half the cart's momentum plus a random tumble so it reads as being thrown
--- off, not just dropped straight down.
-local function ejectFromCart(humanoid, rootPart)
-	local seat = humanoid.SeatPart
-	local cartVelocity = seat and seat.AssemblyLinearVelocity or Vector3.new()
-
-	humanoid.Sit = false
-	ragdollCharacter(humanoid.Parent)
-
-	local tumble = Vector3.new(math.random(-12, 12), math.random(8, 16), math.random(-12, 12))
-	rootPart.AssemblyLinearVelocity = cartVelocity * 0.5 + tumble
-	rootPart.AssemblyAngularVelocity = Vector3.new(math.random(-6, 6), math.random(-6, 6), math.random(-6, 6))
-end
-
 local ICE_SHELL_NAME = "IceShell"
 
 local function setIceShell(character, frozen)
@@ -198,36 +184,22 @@ local function freezeShopper(player)
 		return
 	end
 
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid.SeatPart and humanoid.SeatPart.Name == CART_SEAT_NAME then
+		return -- riding the HoverCart makes a shopper immune to being tagged
+	end
+
 	player:SetAttribute("Frozen", true)
 	frozenState[player] = {
 		rescueDeadline = os.clock() + RESCUE_TIMEOUT,
 	}
-
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	local wasOnCart = humanoid and humanoid.SeatPart and humanoid.SeatPart.Name == CART_SEAT_NAME
-
-	if wasOnCart and rootPart then
-		ejectFromCart(humanoid, rootPart)
-		task.delay(TUMBLE_DURATION, function()
-			-- Only settle into the standing frozen look if still actually
-			-- frozen -- a rescue or round reset could've happened mid-tumble
-			if player:GetAttribute("Frozen") and character.Parent then
-				unragdollCharacter(character)
-				setFrozenLook(character, true)
-				setIceShell(character, true)
-			end
-		end)
-	else
-		setFrozenLook(character, true)
-		setIceShell(character, true)
-	end
+	setFrozenLook(character, true)
+	setIceShell(character, true)
 end
 
 local function unfreezeShopper(player)
 	local character = player.Character
 	if character then
-		unragdollCharacter(character) -- no-op if it wasn't ragdolled (e.g. rescued mid-tumble)
 		setFrozenLook(character, false)
 		setIceShell(character, false)
 	end
@@ -239,7 +211,6 @@ local function markOut(player)
 	local character = player.Character
 	if character then
 		-- stays visually frozen
-		unragdollCharacter(character) -- no-op if it wasn't ragdolled
 		setFrozenLook(character, true)
 		setIceShell(character, true)
 	end
@@ -301,6 +272,24 @@ freezeShopperEvent.Parent = ServerStorage
 
 freezeShopperEvent.Event:Connect(function(player)
 	freezeShopper(player)
+end)
+
+-- ==================== GENERIC RAGDOLL HOOK ====================
+-- Lets other systems (e.g. AIChaser, when a security guard gets bumped by an
+-- occupied HoverCart) reuse this same ragdoll technique on ANY character --
+-- player or NPC alike -- without duplicating the Motor6D/BallSocketConstraint
+-- conversion code.
+local ragdollCharacterEvent = Instance.new("BindableEvent")
+ragdollCharacterEvent.Name = "RagdollCharacterEvent"
+ragdollCharacterEvent.Parent = ServerStorage
+
+ragdollCharacterEvent.Event:Connect(function(character, duration)
+	ragdollCharacter(character)
+	task.delay(duration, function()
+		if character.Parent then
+			unragdollCharacter(character)
+		end
+	end)
 end)
 
 -- ==================== RESCUE CHANNEL (proximity-based) ====================
