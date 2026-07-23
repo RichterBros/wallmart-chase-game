@@ -1,2 +1,5 @@
 # Roblox Studio lock file - recreated each session, not meaningful to track
 *.rbxl.lock
+
+# Reference/source assets (large binaries) - keep locally, don't bloat the repo
+models/
