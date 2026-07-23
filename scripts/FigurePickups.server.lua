@@ -106,6 +106,11 @@ local function createFigure(spawnPart)
 			return
 		end
 
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid and humanoid.SeatPart then
+			return -- must hop out of the cart to shop
+		end
+
 		local leaderstats = player:FindFirstChild("leaderstats")
 		local coins = leaderstats and leaderstats:FindFirstChild("Coins")
 		if not coins or coins.Value < figureData.price then

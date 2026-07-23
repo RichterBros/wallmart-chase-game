@@ -20,6 +20,8 @@ local ServerStorage = game:GetService("ServerStorage")
 local RESCUE_CHANNEL_TIME = 3 -- seconds a teammate must stand near a frozen shopper
 local RESCUE_TIMEOUT = 25 -- seconds before a frozen shopper is marked "Out"
 local RESCUE_RANGE = 6 -- studs; how close a rescuer must stay during the channel
+local CART_SEAT_NAME = "HoverCartSeat" -- must match HoverCart.server.lua's SEAT_NAME
+local TUMBLE_DURATION = 2 -- seconds a cart-tagged shopper ragdolls/tumbles before settling into the standard frozen look
 
 local shopperTeam = Teams:WaitForChild("Shoppers")
 local securityTeam = Teams:WaitForChild("Security")
@@ -78,6 +80,77 @@ local function setFrozenLook(character, frozen)
 	end
 end
 
+-- ==================== RAGDOLL (cart ejection) ====================
+-- Converts every Motor6D joint to a physics-driven BallSocketConstraint so
+-- the character goes limp instead of staying rigidly upright -- the
+-- standard Roblox ragdoll technique. PlatformStand disables the humanoid's
+-- own upright-balancing controller so it doesn't fight the physics.
+local RAGDOLL_ATTACHMENT_NAME = "RagdollAttachment"
+local RAGDOLL_SOCKET_NAME = "RagdollSocket"
+
+local function ragdollCharacter(character)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.PlatformStand = true
+	end
+
+	for _, joint in character:GetDescendants() do
+		if joint:IsA("Motor6D") and joint.Part0 and joint.Part1 and joint.Enabled then
+			local a0 = Instance.new("Attachment")
+			a0.Name = RAGDOLL_ATTACHMENT_NAME
+			a0.CFrame = joint.C0
+			a0.Parent = joint.Part0
+
+			local a1 = Instance.new("Attachment")
+			a1.Name = RAGDOLL_ATTACHMENT_NAME
+			a1.CFrame = joint.C1
+			a1.Parent = joint.Part1
+
+			local socket = Instance.new("BallSocketConstraint")
+			socket.Name = RAGDOLL_SOCKET_NAME
+			socket.Attachment0 = a0
+			socket.Attachment1 = a1
+			socket.Parent = joint.Part0
+
+			joint.Enabled = false
+		end
+	end
+end
+
+local function unragdollCharacter(character)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.PlatformStand = false
+	end
+
+	for _, joint in character:GetDescendants() do
+		if joint:IsA("Motor6D") and not joint.Enabled then
+			joint.Enabled = true
+		end
+	end
+
+	for _, descendant in character:GetDescendants() do
+		if descendant.Name == RAGDOLL_SOCKET_NAME or descendant.Name == RAGDOLL_ATTACHMENT_NAME then
+			descendant:Destroy()
+		end
+	end
+end
+
+-- Pops a seated shopper out of a HoverCart and sends them tumbling: inherits
+-- half the cart's momentum plus a random tumble so it reads as being thrown
+-- off, not just dropped straight down.
+local function ejectFromCart(humanoid, rootPart)
+	local seat = humanoid.SeatPart
+	local cartVelocity = seat and seat.AssemblyLinearVelocity or Vector3.new()
+
+	humanoid.Sit = false
+	ragdollCharacter(humanoid.Parent)
+
+	local tumble = Vector3.new(math.random(-12, 12), math.random(8, 16), math.random(-12, 12))
+	rootPart.AssemblyLinearVelocity = cartVelocity * 0.5 + tumble
+	rootPart.AssemblyAngularVelocity = Vector3.new(math.random(-6, 6), math.random(-6, 6), math.random(-6, 6))
+end
+
 local ICE_SHELL_NAME = "IceShell"
 
 local function setIceShell(character, frozen)
@@ -126,17 +199,35 @@ local function freezeShopper(player)
 	end
 
 	player:SetAttribute("Frozen", true)
-	setFrozenLook(character, true)
-	setIceShell(character, true)
-
 	frozenState[player] = {
 		rescueDeadline = os.clock() + RESCUE_TIMEOUT,
 	}
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	local wasOnCart = humanoid and humanoid.SeatPart and humanoid.SeatPart.Name == CART_SEAT_NAME
+
+	if wasOnCart and rootPart then
+		ejectFromCart(humanoid, rootPart)
+		task.delay(TUMBLE_DURATION, function()
+			-- Only settle into the standing frozen look if still actually
+			-- frozen -- a rescue or round reset could've happened mid-tumble
+			if player:GetAttribute("Frozen") and character.Parent then
+				unragdollCharacter(character)
+				setFrozenLook(character, true)
+				setIceShell(character, true)
+			end
+		end)
+	else
+		setFrozenLook(character, true)
+		setIceShell(character, true)
+	end
 end
 
 local function unfreezeShopper(player)
 	local character = player.Character
 	if character then
+		unragdollCharacter(character) -- no-op if it wasn't ragdolled (e.g. rescued mid-tumble)
 		setFrozenLook(character, false)
 		setIceShell(character, false)
 	end
@@ -148,6 +239,7 @@ local function markOut(player)
 	local character = player.Character
 	if character then
 		-- stays visually frozen
+		unragdollCharacter(character) -- no-op if it wasn't ragdolled
 		setFrozenLook(character, true)
 		setIceShell(character, true)
 	end

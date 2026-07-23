@@ -21,11 +21,37 @@ local COIN_VALUE = 1 -- coins awarded per pickup
 local SPIN_SPEED = 60 -- degrees per second
 
 local COIN_TAG = "Coin"
+local CART_SEAT_NAME = "HoverCartSeat" -- must match HoverCart.server.lua's SEAT_NAME
 
 local shopperTeam = Teams:WaitForChild("Shoppers")
 local securityTeam = Teams:WaitForChild("Security")
 
 local coinSpawnFolder = workspace.Map:WaitForChild("CoinSpawns")
+
+-- Coins are normally touched by a player's own character. If a HoverCart (or
+-- one of its welded decorative parts) touches one instead, credit whoever's
+-- riding it -- otherwise a cart driving straight over a coin wouldn't collect
+-- it, since the seat/body parts aren't part of any player's character.
+local function getPlayerFromTouch(hit)
+	local ancestorModel = hit:FindFirstAncestorOfClass("Model")
+
+	if ancestorModel then
+		local player = Players:GetPlayerFromCharacter(ancestorModel)
+		if player then
+			return player
+		end
+	end
+
+	local seat = hit
+	if not (seat:IsA("VehicleSeat") and seat.Name == CART_SEAT_NAME) then
+		seat = ancestorModel and ancestorModel:FindFirstChild(CART_SEAT_NAME, true)
+	end
+	if seat and seat.Occupant then
+		return Players:GetPlayerFromCharacter(seat.Occupant.Parent)
+	end
+
+	return nil
+end
 
 -- ========================= LEADERSTATS ==========================
 -- Coins show in the default Roblox leaderboard (Tab key) -- no custom UI needed.
@@ -88,11 +114,7 @@ local function createCoin(spawnPart)
 		if collected then
 			return
 		end
-		local character = hit:FindFirstAncestorOfClass("Model")
-		if not character then
-			return
-		end
-		local player = Players:GetPlayerFromCharacter(character)
+		local player = getPlayerFromTouch(hit)
 		if not player or player.Team ~= shopperTeam then
 			return
 		end

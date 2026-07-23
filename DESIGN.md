@@ -92,6 +92,23 @@ playtests)
 - Trend-proofing: brainrot is a *skin* on the collectible system, not the core
   identity — shelves can restock with whatever the next trend is
 
+## Mobility: hover carts (Shopper-only)
+
+Optional faster movement for Shoppers, roaming the main aisles. Press E to
+hop in/out (ProximityPrompt).
+
+- **25 studs/sec** vs. the player's base 16 — a real speed advantage in open
+  aisles, at the cost of being unable to shop while riding
+- Must dismount (E) to buy figures off shelves — can't shop from the cart
+- Security-only rule: Security can never ride, so this never becomes a
+  chaser tool
+- Getting tagged while riding ejects the shopper (ragdoll physics, tumbles a
+  couple seconds) instead of the normal standing freeze, then settles into
+  the standard frozen/rescue state once they land
+- **To do:** banking/tilt lean into turns for extra physicality — holding off
+  until there's a real cart model, since it needs a dedicated visual body
+  part rather than one rigidly welded to the physics seat
+
 ## Freeze & rescue (anti-frustration design)
 
 Goal: no dead time for tagged players, but the chaser must always accumulate
@@ -180,6 +197,12 @@ Piggy / Flee the Facility model).
   confiscates your cart on tag; pay to secure them. Real shoplifter-vs-security
   fantasy, but needs a carried-inventory system — variant mode only, and it
   reintroduces checkout-camping risk, so it must solve that first
+- **Multi-level map** — ramps/staircases connecting floors; AI pathfinding
+  should handle this for free (walkable navmesh), just needs generous
+  floor-to-ceiling clearance and 2+ routes per level to avoid a camped
+  chokepoint
+- **Secret doors, lava traps, other obstacles** — map dressing/hazards once
+  the core layout is locked in
 
 ## Open questions
 

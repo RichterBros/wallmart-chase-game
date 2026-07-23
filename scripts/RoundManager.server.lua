@@ -201,8 +201,15 @@ local function runRound()
 		aiChaserDespawnEvent:Fire()
 	end
 
-	-- Timer ran out with shoppers still free -> shoppers survive -> they win
-	return winner or "Shoppers"
+	-- Timer ran out with no winner decided yet: merely surviving uncaught is
+	-- no longer enough on its own -- Shoppers only win if someone actually
+	-- escaped (list complete + reached the exit) before time ran out.
+	if not winner then
+		local _, escaped = getShopperStatus()
+		winner = (#escaped > 0) and "Shoppers" or "Security"
+	end
+
+	return winner
 end
 
 -- ======================== MAIN LOOP =========================
