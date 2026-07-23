@@ -18,14 +18,14 @@ local Players = game:GetService("Players")
 local ServerStorage = game:GetService("ServerStorage")
 
 -- ========================== CONFIG ==========================
-local CART_SPEED = 35 -- studs/sec top speed
-local TURN_SPEED = 3 -- radians/sec at full steer
+local CART_SPEED = 35 -- studs/sec top speed (unchanged -- this is the cap being eased into now)
+local TURN_SPEED = 1.5 -- radians/sec at full steer (lower = gentler max turn rate, less sharp on keyboard input)
 local HOVER_HEIGHT = 6 -- studs the cart floats above the floor (tall enough to clear a seated character's dangling legs, not just the chassis)
 local HOVER_RAY_LENGTH = 20 -- studs; how far down to look for the floor
 local HOVER_SPRING = 8 -- higher = firmer air cushion, lower = softer/sinkier
 local HOVER_DAMPING = 4 -- higher = settles faster, lower = more bounce/cushion feel
 local TURN_SMOOTHING = 6 -- higher = reaches full turn rate faster, lower = floatier/smoother
-local ACCEL_SMOOTHING = 3 -- higher = reaches top speed faster, lower = more momentum/coasting
+local ACCEL_SMOOTHING = 1.2 -- lower = slower ramp-up to top speed (was 3; noticeably slower start now)
 local SEAT_NAME = "HoverCartSeat"
 
 local shopperTeam = Teams:WaitForChild("Shoppers")
